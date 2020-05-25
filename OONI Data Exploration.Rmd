@@ -1,0 +1,329 @@
+---
+title: "OONI Web Connectivity Test Data Exploration"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r warning=FALSE, include=FALSE}
+library(tidyverse)
+library(knitr)
+
+library(lubridate)
+```
+
+## Data Import
+Data for OONI Meeasurements of the Web Connectivity Test in the UK from January 2020
+
+```{r echo=TRUE, warning=FALSE}
+df <- read.csv('OONI January 2020.csv', na.strings = c('Na','NA', ''))
+
+# row numbers...
+df$X <- NULL
+
+df %>% head()
+```
+
+
+## Data Cleaning
+
+```{r}
+# transform booleans to loical
+df$anomaly <- as.logical(df$anomaly)
+df$confirmed <- as.logical(df$confirmed)
+df$failure <- as.logical(df$failure)
+df$https <- as.logical(df$https)
+df$headers_match <- as.logical(df$headers_match)
+df$body_length_match <- as.logical(df$body_length_match)
+
+df$measurement_start_time <- as.Date(df$measurement_start_time)
+```
+
+
+### False Anomaly Cloudflare
+
+
+'Attention Required | Cloudflare', sounds like a Error page from the Cloudflare DNS...
+
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE}
+df %>% filter(anomaly,grepl("Cloudflare", page_title))
+```
+
+### False Pandora detection
+
+pandora.com displays a page that its service is only available from the US.
+
+```{r message=FALSE, warning=FALSE}
+df %>% filter(grepl("pandora", input)) %>% group_by(asn_network, dns_network, blocking) %>% count()
+
+```
+
+```{r}
+# Yahoo Mail blocked
+
+df %>% filter(anomaly) %>% group_by(input) %>% count() %>% arrange(-n)
+
+df %>% filter(anomaly, input == 'https://mail.yahoo.com/')
+```
+
+
+
+```{r}
+
+print(paste("Before Cleaning: ",nrow(df), "rows",sum(df$anomaly), "anomalies", sum(df$blocking != "False" & !is.na(df$blocking)), "blocks"))
+
+# Exclude measurements with control probe errors
+df <- df %>% 
+  filter(control_status_code == 200 | is.na(control_status_code), 
+         is.na(control_dns_failure), 
+         is.na(control_http_failure), 
+         is.na(control_failure), 
+         !grepl("pandora", input),
+         !grepl("Attention Required! | Cloudflare", page_title))
+
+# dected block in blocking is not NA and not False
+df$blocked <- !is.na(df$blocking) & df$blocking != 'False'
+
+
+print(paste("After Cleaning: ",nrow(df), "rows",sum(df$anomaly), "anomalies", sum(df$blocking != "False" & !is.na(df$blocking)), "blocks"))
+
+```
+
+
+## Data Exploration
+
+```{r}
+# Display column properties
+data.frame(Type = sapply(sapply(df, class), `[[`, 1), Dist.Values = sapply(sapply(df, unique), length), NAs = colSums(is.na(df))) %>% kable()
+
+```
+
+
+
+### Categorical Values Distributions
+
+```{r}
+# Plot values distributions for categorical variables with between 2 and 30 distinct values
+for(x in colnames(
+  df[ , sapply(sapply(df, unique), length) > 1 
+      & sapply(sapply(df, unique), length) < 30 
+      & !sapply(df, is.numeric)])){
+  
+  
+  p <- df %>% ggplot(mapping = aes(x = get(x), fill= get(x))) +
+  geom_bar()+
+  labs(
+    title = paste(x, " - ",class(df[ , x])),
+    x = ''
+  )  +
+  geom_text(
+     aes(label=paste0(round(stat(prop),3)*100,'%'), group=1),
+     stat='count',
+     nudge_y = 10
+ ) +
+  theme_minimal() +
+  theme (
+    axis.text.x = element_text(angle = 18, hjust = 1),
+    legend.position = 'none'    
+         )
+  
+  
+  print(p)
+  
+}
+```
+
+
+### Tested URLs
+```{r message=FALSE, warning=FALSE}
+# URLs
+length(unique(df$input))
+# domains
+length(unique(df$domain))
+
+# Are all URLs tested by all probes?
+df %>% group_by(asn_network) %>% summarise(total = n(),unique_urls =length(unique(domain)) ) %>% arrange(-total)
+
+# Seems that URLs are not tested equally often by all probes
+
+```
+
+### Which Domains most often Blocked?
+
+```{r}
+# How many measurements are blocked ?
+nrow(df %>% filter(blocked)) / nrow(df)
+
+
+# Most tested ISPs
+df %>% 
+  filter(blocked) %>%
+  group_by(domain, page_title) %>% 
+  count() %>% 
+  arrange(-n)
+```
+
+
+## Most common HTTP response status codes
+
+```{r message=FALSE, warning=FALSE}
+df %>% 
+  group_by(http_status_code) %>% 
+  count() %>% 
+  mutate(total_share = (n / nrow(df)) ) %>%
+  arrange(-n)
+```
+
+https://restfulapi.net/http-status-codes/
+
+200 - ok
+301 - moved permamently
+302 - found URL redirection
+307 - temporarly redirect
+403 - Forbidden
+404 - Not Found
+500 - Server Error
+
+
+### Any Legal HTTP blocks?
+```{r}
+df %>% filter(grepl("451", http_status_code))
+
+```
+
+3 cases with a reported legal Block...
+Exponential-E Ltd.
+
+
+
+### Blocking Mechanisms
+```{r}
+df %>% 
+  filter(blocked) %>%
+  group_by(blocking) %>%
+  count()
+```
+
+
+### Time Series
+
+```{r}
+# get the dat from measurement start
+df <- df %>% mutate(dt = date(measurement_start_time))
+
+# How many measurements per day??
+df %>% group_by(dt) %>% count() %>% ggplot(aes(x = dt, y = n)) + geom_bar(stat = 'sum') + ggtitle("Measurements per Day") 
+
+# How many distinct domains tested that day ?
+df %>% group_by(dt) %>% summarise(domains_tested = length(unique(input))) %>% ggplot(aes(x = dt, y = domains_tested)) + geom_bar(stat = 'sum') + ggtitle("URLs tested per Day")
+
+ 
+```
+
+
+## Comparison blocking per ISP
+
+### Non Mobile Networks
+
+```{r warning=FALSE}
+df %>% 
+  filter(probe_network_type != 'mobile' | is.na(probe_network_type) ) %>%
+  group_by(asn_network) %>% 
+  summarise(Measurements= n(),  URLs = length(unique(input)), blocked_urls= length(unique(input[blocked]))) %>% 
+  arrange(-Measurements) #%>%
+  #write.csv('non Mobile ISPs.csv', row.names = FALSE)
+```
+
+### Mobile Networks
+
+```{r warning=FALSE}
+df %>% 
+  filter(probe_network_type == 'mobile') %>%
+  group_by(asn_network) %>% 
+  summarise(Measurements= n(),  URLs = length(unique(input)), blocked_urls= length(unique(input[blocked]))) %>% 
+  arrange(-Measurements) #%>%
+  #write.csv('Mobile ISPs.csv', row.names = FALSE)
+
+```
+
+
+
+## Blocking Techniques per ISP
+
+### All Networks 
+
+```{r warning=FALSE}
+df %>% 
+  filter(blocked) %>% 
+  count(asn_network, blocking) %>% 
+  spread(blocking,n) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(Total = rowSums(.[2:5])) %>%
+  arrange(-Total) %>%
+  select(asn_network, Total, dns,'http-diff', 'http-failure', tcp_ip)
+
+```
+
+
+### HTTP vs HTTPS blockings
+
+```{r warning=FALSE}
+# How many distinct URLs blocked
+df %>% 
+  group_by(https) %>% 
+  summarise(Measurements= n(),  Blocked = sum(blocked), URLs = length(unique(input)), blocked_urls= length(unique(input[blocked]))) %>% 
+  mutate(Share_blocked = Blocked / Measurements, Share_blocked_URLs = blocked_urls / URLs) %>%
+  arrange(-Measurements) 
+
+```
+
+
+
+```{r warning=FALSE}
+# HTTP 
+df %>% 
+  filter(!https) %>% 
+  count(asn_network, blocking) %>% 
+  spread(blocking,n) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(Total = rowSums(.[2:7]) , Blocked = rowSums(.[ c('dns','http-diff', 'http-failure', 'tcp_ip') ]), blocked_share = Blocked / Total ) %>%
+  select(asn_network, Total, Blocked, blocked_share, dns, 'http-failure', 'http-diff', tcp_ip) %>%
+  arrange(-Total) #%>%
+  #write.csv('blocking_technique HTTP.csv', row.names = FALSE)
+
+# HTTPS
+df %>% 
+  filter(!https) %>% 
+  count(asn_network, blocking) %>% 
+  spread(blocking,n) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(Total = rowSums(.[2:7]) , Blocked = rowSums(.[ c('dns','http-diff', 'http-failure', 'tcp_ip') ]), blocked_share = Blocked / Total ) %>%
+  select(asn_network, Total, Blocked, blocked_share, dns, 'http-failure', 'http-diff', tcp_ip) %>%
+  arrange(-Total) #%>%
+  #write.csv('blocking_technique HTTP.csv', row.names = FALSE)
+
+```
+
+
+### DNS blocking 
+```{r warning=FALSE}
+df %>%
+  group_by(asn_network,dns_network) %>%
+  summarise(Measurements = n(), Blocks = sum(blocked), DNS_Blocks = sum(blocked[blocking == 'dns'])) %>%
+  arrange(-Measurements) 
+
+```
+
+
+## Age Verification Pages 
+
+```{r}
+df %>% 
+  filter(blocked, probe_network_type == 'mobile', blocking =='http-diff', asn_network =='Telefonica UK Limited') 
+  
+```
+
+https://api.ooni.io/api/v1/measurement/temp-id-377435600 depicts a age verification page from O2
+
+
